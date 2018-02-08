@@ -1,0 +1,5 @@
+*.o
+*.wav
+*.frq
+frq0003gen
+*/.DS_STORE
