@@ -1,4 +1,4 @@
-(Branch of https://github.com/titinko/Macres)
+(Fork of https://github.com/titinko/Macres)
 
 frq0003gen takes as input a 16-bit wav file and outputs a FREQ0003 (.frq) file that can be
 read by UTSU, UTAU, or similar programs.
