@@ -7,6 +7,7 @@
 
 #include <windows.h>
 
+#include <libpyin/pyin.h>
 #include "world.h"
 #include "wavread.h"
 
@@ -65,22 +66,38 @@ int main(int argc, char *argv[])
 
 	double ms_per_frq;
 	double avg_frq;
-	double *waveform, *f0, *avg_amp;
+	double *waveform, *avg_amp;
 	int num_samples;
 	int num_amp_values;
 	int num_frames;
 
-	if(argc < 4) 
+	if(argc < 3) 
 	{
-		printf("Params: inputfile outputfile samplesPerFrq\n");
+		printf("Params: inputfile outputfile samplesPerFrq flags\n");
 		return 0;
 	}
 
-	FILE *file;
-
+	int samples_per_frq = 256; // Default value used in UTAU frq files.
+	if (argc > 3)
+	{
+		samples_per_frq = atoi(argv[3]);
+	}
+	
+	/* Parse flags. */
+	char *string_buf;
+	
+	// 'm' flag: method for generating f0.
+	// m0 uses libpyin. (default)
+	// m1 uses DIO.
+	int flag_m = 0;
+	if (argc > 4 && (string_buf = strchr(argv[4], 'm')) != 0)
+	{
+		sscanf(string_buf + 1, "%d", &flag_m);
+	}
+	
 	int sample_rate, bits_per_sample;
 	waveform = ReadWaveFile(argv[1], &sample_rate, &bits_per_sample, &num_samples, 
-							&num_amp_values, atoi(argv[3]), &avg_amp);
+							&num_amp_values, samples_per_frq, &avg_amp);
 
 	if(waveform == NULL)
 	{
@@ -94,7 +111,7 @@ int main(int argc, char *argv[])
 	printf("Length %f [sec]\n", (double)num_samples/(double)sample_rate);
 
 	// Calculate beforehand the number of samples in F0.
-	ms_per_frq = atoi(argv[3]) * 1000.0 / sample_rate;
+	ms_per_frq = samples_per_frq * 1000.0 / sample_rate;
 	num_frames = GetNumDIOSamples(sample_rate, num_samples, ms_per_frq);
 	if (num_frames != num_amp_values) {
 		fprintf(stderr, "Error: num frq values is %d, num amp values is %d.\n", 
@@ -103,16 +120,49 @@ int main(int argc, char *argv[])
 		free(avg_amp);
 		return 0;
 	}
-	f0 = (double *)malloc(sizeof(double)*num_frames);
 
-	// Start to estimate F0 contour (fundamental frequency) using DIO.
+	// Start to estimate F0 contour (fundamental frequency) using requested method.
 	DWORD elapsedTime;
 	printf("\nAnalysis\n");
 	elapsedTime = timeGetTime();
+	double * f0 = (double *) malloc(sizeof(double) * num_frames);
 
-	dio(waveform, num_samples, sample_rate, ms_per_frq, f0);
+	if (flag_m == 1)
+	{
+		// DIO method.
+		dio(waveform, num_samples, sample_rate, ms_per_frq, f0);
+		printf("DIO: %d [msec]\n", timeGetTime() - elapsedTime);
+	}
+	else 
+	{
+		// pyin method.
+		FP_TYPE* wavform_pyin;
+		wavform_pyin = (FP_TYPE *) malloc(sizeof(FP_TYPE) * num_samples);
+		for (i = 0; i < num_samples; i++) 
+		{
+			// Convert wavform to FP_TYPE for now.
+			wavform_pyin[i] = (FP_TYPE) waveform[i];
+		}
+		pyin_config param = pyin_init(samples_per_frq);
+		param.fmin = 50.0;
+		param.fmax = 800.0;
+		param.trange = pyin_trange(param.nq, param.fmin, param.fmax);
+		param.nf = samples_per_frq * 5; // Number of samples in an analysis frame.
+		param.w = param.nf / 3; // Correlation size in samples.
+
+		int pyin_nfrm = 0;
+		FP_TYPE* f0_pyin = pyin_analyze(param, wavform_pyin, num_samples, sample_rate,
+			&pyin_nfrm);
+		for (i = 0; i < num_frames; i++)
+		{
+			// Convert from FP_TYPE (float) to double for now.
+			f0[i] = (double) ((i >= pyin_nfrm) ? f0_pyin[pyin_nfrm - 1] : f0_pyin[i]);
+		}
+		free(wavform_pyin);
+		free(f0_pyin);
+		printf("PYIN: %d [msec]\n", timeGetTime() - elapsedTime);
+	}
 	avg_frq = getFrqAvg(f0, num_frames);
-	printf("DIO: %d [msec]\n", timeGetTime() - elapsedTime);
 
 	// Write output to file.
 	char header[40];
@@ -125,14 +175,14 @@ int main(int argc, char *argv[])
 
 	header[0] = 'F'; header[1] = 'R'; header[2] = 'E'; header[3] = 'Q';
 	header[4] = '0'; header[5] = '0'; header[6] = '0'; header[7] = '3';
-	*((int*)(&header[8])) = 256;							// Samples per frq value.
+	*((int*)(&header[8])) = samples_per_frq;				// Samples per frq value.
 	*((double*)(&header[12])) = avg_frq;					// Average frequency.
 	for (i = 0; i < 4; i++) {
 		*((int*)(&header[20 + (i * 4)])) = 0;				// Empty space.
 	}
 	*((int*)(&header[36])) = num_frames;					// Number of F0 frames.
 
-	file = fopen(argv[2], "wb");
+	FILE *file = fopen(argv[2], "wb");
 	fwrite(header, sizeof(char), 40, file);
 	fwrite(output, sizeof(double), num_frames * 2, file);
 	fclose(file);
